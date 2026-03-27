@@ -61,6 +61,8 @@ public:
     TIMESTAMP,
     DATE,
     TIME,
+    ENUM,
+    SET,
     COLUMN_MAX // should be last
   } type_;
   /* used to create new table/alter table add column*/
@@ -129,6 +131,24 @@ struct Generated_Column : public Column {
   ~Generated_Column(){};
   COLUMN_TYPES g_type; // sub type can be blob,int, varchar
   COLUMN_TYPES generate_type() { return g_type; };
+};
+
+struct Enum_Column : public Column {
+  Enum_Column(std::string name, Table *table);
+  Enum_Column(std::string name, Table *table, std::string enum_values_);
+  std::string enum_values;
+  std::string clause() { return "ENUM(" + enum_values + ")"; };
+  std::string rand_value();
+  template <typename Writer> void Serialize(Writer &writer) const;
+};
+
+struct Set_Column : public Column {
+  Set_Column(std::string name, Table *table);
+  Set_Column(std::string name, Table *table, std::string set_values_);
+  std::string set_values;
+  std::string clause() { return "SET(" + set_values + ")"; };
+  std::string rand_value();
+  template <typename Writer> void Serialize(Writer &writer) const;
 };
 
 struct Ind_col {

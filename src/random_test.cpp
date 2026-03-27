@@ -631,6 +631,10 @@ Column::COLUMN_TYPES Column::col_type(std::string type) {
     return DATE;
   else if (type.compare("TIME") == 0)
     return TIME;
+  else if (type.compare("ENUM") == 0)
+    return ENUM;
+  else if (type.compare("SET") == 0)
+    return SET;
   else
     throw std::runtime_error("unhandled " + col_type_to_string(type_) +
                              " at line " + std::to_string(__LINE__));
@@ -665,6 +669,10 @@ const std::string Column::col_type_to_string(COLUMN_TYPES type) {
     return "DATE";
   case TIME:
     return "TIME";
+  case ENUM:
+    return "ENUM";
+  case SET:
+    return "SET";
   case COLUMN_MAX:
     break;
   }
@@ -740,6 +748,8 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
     return std::string(buf);
     break;
   }
+  case Column::COLUMN_TYPES::ENUM:
+  case Column::COLUMN_TYPES::SET:
   case Column::COLUMN_TYPES::GENERATED:
   case Column::COLUMN_TYPES::COLUMN_MAX:
     throw std::runtime_error("unhandled " + Column::col_type_to_string(type_) +
@@ -1020,6 +1030,120 @@ void Generated_Column::Serialize(Writer &writer) const {
   writer.String(type.c_str(), static_cast<SizeType>(type.length()));
   writer.String("clause");
   writer.String(str.c_str(), static_cast<SizeType>(str.length()));
+}
+
+/* Enum column constructor for random creation */
+Enum_Column::Enum_Column(std::string name, Table *table)
+    : Column(table, Column::ENUM) {
+  name_ = "e" + name;
+  int num_values = rand_int(5, 2);
+  std::vector<std::string> values;
+  for (int i = 0; i < num_values; i++) {
+    values.push_back("'enum_val" + std::to_string(i) + "'");
+  }
+  enum_values = "";
+  for (size_t i = 0; i < values.size(); i++) {
+    enum_values += values[i];
+    if (i < values.size() - 1)
+      enum_values += ",";
+  }
+}
+
+/* Enum column constructor for load metadata */
+Enum_Column::Enum_Column(std::string name, Table *table, std::string enum_values_)
+    : Column(table, Column::ENUM) {
+  name_ = name;
+  enum_values = enum_values_;
+}
+
+/* Return random enum value */
+std::string Enum_Column::rand_value() {
+  std::vector<std::string> values;
+  std::string temp = enum_values;
+  size_t pos = 0;
+  while ((pos = temp.find(',')) != std::string::npos) {
+    values.push_back(temp.substr(0, pos));
+    temp.erase(0, pos + 1);
+  }
+  if (!temp.empty())
+    values.push_back(temp);
+  if (values.empty())
+    return "''";
+  return values[rand_int(values.size() - 1)];
+}
+
+/* add enum_values metadata */
+template <typename Writer> void Enum_Column::Serialize(Writer &writer) const {
+  writer.String("enum_values");
+  writer.String(enum_values.c_str(), static_cast<SizeType>(enum_values.length()));
+}
+
+/* Set column constructor for random creation */
+Set_Column::Set_Column(std::string name, Table *table)
+    : Column(table, Column::SET) {
+  name_ = "s" + name;
+  int num_values = rand_int(5, 2);
+  std::vector<std::string> values;
+  for (int i = 0; i < num_values; i++) {
+    values.push_back("'set_val" + std::to_string(i) + "'");
+  }
+  set_values = "";
+  for (size_t i = 0; i < values.size(); i++) {
+    set_values += values[i];
+    if (i < values.size() - 1)
+      set_values += ",";
+  }
+}
+
+/* Set column constructor for load metadata */
+Set_Column::Set_Column(std::string name, Table *table, std::string set_values_)
+    : Column(table, Column::SET) {
+  name_ = name;
+  set_values = set_values_;
+}
+
+/* Return random set value (can be single or multiple values) */
+std::string Set_Column::rand_value() {
+  std::vector<std::string> values;
+  std::string temp = set_values;
+  size_t pos = 0;
+  while ((pos = temp.find(',')) != std::string::npos) {
+    values.push_back(temp.substr(0, pos));
+    temp.erase(0, pos + 1);
+  }
+  if (!temp.empty())
+    values.push_back(temp);
+  if (values.empty())
+    return "''";
+  std::string result = "'";
+  int num_to_select = rand_int(values.size(), 1);
+  std::vector<int> selected_indices;
+  for (int i = 0; i < num_to_select; i++) {
+    int idx = rand_int(values.size() - 1);
+    bool already_selected = false;
+    for (int j : selected_indices) {
+      if (j == idx) {
+        already_selected = true;
+        break;
+      }
+    }
+    if (!already_selected) {
+      selected_indices.push_back(idx);
+      std::string val = values[idx];
+      val.erase(std::remove(val.begin(), val.end(), '\''), val.end());
+      if (result != "'")
+        result += ",";
+      result += val;
+    }
+  }
+  result += "'";
+  return result;
+}
+
+/* add set_values metadata */
+template <typename Writer> void Set_Column::Serialize(Writer &writer) const {
+  writer.String("set_values");
+  writer.String(set_values.c_str(), static_cast<SizeType>(set_values.length()));
 }
 
 template <typename Writer> void Ind_col::Serialize(Writer &writer) const {
@@ -1703,8 +1827,8 @@ void Table::CreateDefaultColumn() {
       /* loop untill we select some column */
       while (col_type == Column::COLUMN_MAX) {
 
-        /* columns are 6:2:2:4:2:2:1:1:1:1:1 INT:FLOAT:DOUBLE:VARCHAR:CHAR:BLOB:BOOL:DATETIME:TIMESTAMP:DATE:TIME */
-        auto prob = rand_int(23);
+        /* columns are 6:2:2:4:2:2:1:1:1:1:1:1:1 INT:FLOAT:DOUBLE:VARCHAR:CHAR:BLOB:BOOL:DATETIME:TIMESTAMP:DATE:TIME:ENUM:SET */
+        auto prob = rand_int(25);
 
         /* intial columns can't be generated columns. also 50% of tables last
          * columns are virtuals */
@@ -1734,12 +1858,20 @@ void Table::CreateDefaultColumn() {
           col_type = Column::DATE;
         else if (prob == 22)
           col_type = Column::TIME;
+        else if (prob == 23)
+          col_type = Column::ENUM;
+        else if (prob == 24)
+          col_type = Column::SET;
       }
 
       if (col_type == Column::GENERATED)
         col = new Generated_Column(name, this);
       else if (col_type == Column::BLOB)
         col = new Blob_Column(name, this);
+      else if (col_type == Column::ENUM)
+        col = new Enum_Column(name, this);
+      else if (col_type == Column::SET)
+        col = new Set_Column(name, this);
       else
         col = new Column(name, this, col_type);
 
@@ -2775,6 +2907,8 @@ void Table::DeleteRandomRow(Thd1 *thd) {
       case Column::TIMESTAMP:
       case Column::DATE:
       case Column::TIME:
+      case Column::ENUM:
+      case Column::SET:
         where = col_pos;
         break;
       case Column::INTEGER:
@@ -2846,6 +2980,8 @@ void Table::SelectRandomRow(Thd1 *thd) {
     case Column::TIMESTAMP:
     case Column::DATE:
     case Column::TIME:
+    case Column::ENUM:
+    case Column::SET:
       where = col_pos;
       break;
     case Column::INTEGER:
@@ -3688,6 +3824,14 @@ static std::string load_metadata_from_file() {
       } else if (type.compare("BLOB") == 0) {
         auto sub_type = col["sub_type"].GetString();
         a = new Blob_Column(col["name"].GetString(), table, sub_type);
+      } else if (type.compare("ENUM") == 0) {
+        auto name = col["name"].GetString();
+        auto enum_values = col["enum_values"].GetString();
+        a = new Enum_Column(name, table, enum_values);
+      } else if (type.compare("SET") == 0) {
+        auto name = col["name"].GetString();
+        auto set_values = col["set_values"].GetString();
+        a = new Set_Column(name, table, set_values);
       } else
         throw std::runtime_error("unhandled column type");
 
