@@ -96,22 +96,39 @@ static bool mysql_num_fields_safe(Thd1 *thd, unsigned int req) {
   return ret;
 }
 
-/* generate random numbers to populate in primary and fk
-@param[in] number_of_records
-@param[out] vector containing unique elements */
-static std::vector<int> generateUniqueRandomNumbers(int number_of_records) {
+/* generate unique random values to populate primary keys and foreign keys
+@param[in] type column type for which to generate values
+@param[in] number_of_records number of unique values to generate
+@param[in] length length to use for string/BLOB types (0 means default)
+@param[out] vector containing unique elements formatted for SQL */
+static std::vector<std::string> generateUniqueRandomValues(
+    Column::COLUMN_TYPES type, int number_of_records, int length = 0) {
 
-  std::unordered_set<int> unique_keys_set(number_of_records);
-
-  int max_size =
-      g_integer_range * options->at(Option::INITIAL_RECORDS_IN_TABLE)->getInt();
+  std::unordered_set<std::string> unique_keys_set;
 
   while (unique_keys_set.size() < static_cast<size_t>(number_of_records)) {
-    unique_keys_set.insert(rand_int(max_size, 1));
+    std::string value;
+
+    if (type == Column::COLUMN_TYPES::CHAR ||
+        type == Column::COLUMN_TYPES::VARCHAR ||
+        type == Column::COLUMN_TYPES::BLOB) {
+      /* Ensure PK/FK string values are never empty (''), which can easily lead
+       * to duplicate-key errors due to truncation/empty-string collisions. */
+      int len = length > 1 ? length : g_max_columns_length;
+      if (len < 1)
+        len = 1;
+      value = rand_value_universal(type, len);
+      if (value == "''")
+        continue;
+    } else {
+      value = rand_value_universal(type, length);
+    }
+
+    unique_keys_set.insert(value);
   }
 
-  std::vector<int> unique_keys(unique_keys_set.begin(), unique_keys_set.end());
-  return unique_keys;
+  return std::vector<std::string>(unique_keys_set.begin(),
+                                  unique_keys_set.end());
 }
 
 /* run check table */
@@ -606,6 +623,14 @@ Column::COLUMN_TYPES Column::col_type(std::string type) {
     return FLOAT;
   else if (type.compare("DOUBLE") == 0)
     return DOUBLE;
+  else if (type.compare("DATETIME") == 0)
+    return DATETIME;
+  else if (type.compare("TIMESTAMP") == 0)
+    return TIMESTAMP;
+  else if (type.compare("DATE") == 0)
+    return DATE;
+  else if (type.compare("TIME") == 0)
+    return TIME;
   else
     throw std::runtime_error("unhandled " + col_type_to_string(type_) +
                              " at line " + std::to_string(__LINE__));
@@ -632,6 +657,14 @@ const std::string Column::col_type_to_string(COLUMN_TYPES type) {
     return "BLOB";
   case GENERATED:
     return "GENERATED";
+  case DATETIME:
+    return "DATETIME";
+  case TIMESTAMP:
+    return "TIMESTAMP";
+  case DATE:
+    return "DATE";
+  case TIME:
+    return "TIME";
   case COLUMN_MAX:
     break;
   }
@@ -675,6 +708,38 @@ static std::string rand_value_universal(Column::COLUMN_TYPES type_,
       rand_length /= 10;
     return "\'" + rand_string(rand_length) + "\'";
     break;
+  case Column::COLUMN_TYPES::DATETIME:
+  case Column::COLUMN_TYPES::TIMESTAMP: {
+    int year = rand_int(2030, 1970);
+    int month = rand_int(12, 1);
+    int day = rand_int(28, 1);
+    int hour = rand_int(23, 0);
+    int minute = rand_int(59, 0);
+    int second = rand_int(59, 0);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "'%04d-%02d-%02d %02d:%02d:%02d'",
+             year, month, day, hour, minute, second);
+    return std::string(buf);
+    break;
+  }
+  case Column::COLUMN_TYPES::DATE: {
+    int year = rand_int(2030, 1970);
+    int month = rand_int(12, 1);
+    int day = rand_int(28, 1);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "'%04d-%02d-%02d'", year, month, day);
+    return std::string(buf);
+    break;
+  }
+  case Column::COLUMN_TYPES::TIME: {
+    int hour = rand_int(23, 0);
+    int minute = rand_int(59, 0);
+    int second = rand_int(59, 0);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "'%02d:%02d:%02d'", hour, minute, second);
+    return std::string(buf);
+    break;
+  }
   case Column::COLUMN_TYPES::GENERATED:
   case Column::COLUMN_TYPES::COLUMN_MAX:
     throw std::runtime_error("unhandled " + Column::col_type_to_string(type_) +
@@ -748,6 +813,18 @@ Column::Column(std::string name, Table *table, COLUMN_TYPES type)
     break;
   case BOOL:
     name_ = "t" + name;
+    break;
+  case DATETIME:
+    name_ = "dt" + name;
+    break;
+  case TIMESTAMP:
+    name_ = "ts" + name;
+    break;
+  case DATE:
+    name_ = "d" + name;
+    break;
+  case TIME:
+    name_ = "tm" + name;
     break;
   default:
     throw std::runtime_error("unhandled " + col_type_to_string(type_) +
@@ -1189,8 +1266,18 @@ bool FK_table::load_fk_constraint(Thd1 *thd) {
   }
   assert(pk.size() > 0);
 
+  /* Find fk column name; it may not always be "ifk_col" if the column type
+   * changes (varchar/char). */
+  std::string fk_col = "ifk_col";
+  for (const auto &col : *columns_) {
+    if (col->name_.find("fk_col") != std::string::npos) {
+      fk_col = col->name_;
+      break;
+    }
+  }
+
   std::string sql = "ALTER TABLE " + name_ + " ADD CONSTRAINT " + constraint +
-                    " FOREIGN KEY (ifk_col) REFERENCES " + parent->name_ +
+                    " FOREIGN KEY (" + fk_col + ") REFERENCES " + parent->name_ +
                     " (" + pk + ")";
   sql += " ON UPDATE " + enumToString(on_update);
   sql += " ON DELETE  " + enumToString(on_delete);
@@ -1576,12 +1663,30 @@ void Table::CreateDefaultColumn() {
 
     /* First column can be primary */
     if (i == 0 && rand_int(100) <= options->at(Option::PRIMARY_KEY)->getInt()) {
-      type = Column::INT;
       name = "pkey";
+
+      /* Allow primary key to be different types so foreign key coverage is broader */
+      switch (rand_int(3)) {
+      case 0:
+        type = Column::INT;
+        break;
+      case 1:
+        type = Column::INTEGER;
+        break;
+      case 2:
+        type = Column::VARCHAR;
+        break;
+      default:
+        type = Column::CHAR;
+        break;
+      }
+
       col = new Column{name, this, type};
       col->primary_key = true;
 
-      if (!no_auto_inc && rand_int(3) < 3) {
+      /* Only integer primary keys can be AUTO_INCREMENT */
+      if (!no_auto_inc && rand_int(3) < 3 &&
+          (col->type_ == Column::INT || col->type_ == Column::INTEGER)) {
         /* 75% of primary key tables are autoinc */
         if (this->type == PARTITION && rand_int(3) == 1)
           columns_->at(0)->auto_increment = true;
@@ -1598,8 +1703,8 @@ void Table::CreateDefaultColumn() {
       /* loop untill we select some column */
       while (col_type == Column::COLUMN_MAX) {
 
-        /* columns are 6:2:2:4:2:2:1 INT:FLOAT:DOUBLE:VARCHAR:CHAR:BLOB:BOOL */
-        auto prob = rand_int(19);
+        /* columns are 6:2:2:4:2:2:1:1:1:1:1 INT:FLOAT:DOUBLE:VARCHAR:CHAR:BLOB:BOOL:DATETIME:TIMESTAMP:DATE:TIME */
+        auto prob = rand_int(23);
 
         /* intial columns can't be generated columns. also 50% of tables last
          * columns are virtuals */
@@ -1619,8 +1724,16 @@ void Table::CreateDefaultColumn() {
           col_type = Column::CHAR;
         else if (!no_blob_col && prob < 18)
           col_type = Column::BLOB;
-        else if (prob == 19)
+        else if (prob == 18)
           col_type = Column::BOOL;
+        else if (prob == 19)
+          col_type = Column::DATETIME;
+        else if (prob == 20)
+          col_type = Column::TIMESTAMP;
+        else if (prob == 21)
+          col_type = Column::DATE;
+        else if (prob == 22)
+          col_type = Column::TIME;
       }
 
       if (col_type == Column::GENERATED)
@@ -1871,8 +1984,26 @@ std::string Table::definition(bool with_index) {
       }
       if (type == FK) {
         auto fk = static_cast<FK_table *>(this);
-        def += " FOREIGN KEY (ifk_col) REFERENCES " + fk->parent->name_ +
-               " (ipkey) ";
+        std::string fk_col = "ifk_col";
+        for (const auto &col : *columns_) {
+          if (col->name_.find("fk_col") != std::string::npos) {
+            fk_col = col->name_;
+            break;
+          }
+        }
+
+        std::string parent_pk = "ipkey";
+        if (fk->parent) {
+          for (const auto &col : *fk->parent->columns_) {
+            if (col->primary_key) {
+              parent_pk = col->name_;
+              break;
+            }
+          }
+        }
+
+        def += " FOREIGN KEY (" + fk_col + ") REFERENCES " + fk->parent->name_ +
+               " (" + parent_pk + ") ";
         def += " ON UPDATE " + fk->enumToString(fk->on_update) + " ON DELETE " +
             fk->enumToString(fk->on_delete);
         def += ", ";
@@ -1995,6 +2126,25 @@ void generate_metadata_for_tables() {
           auto child_table = Table::table_id(Table::FK, i);
           all_tables->push_back(child_table);
           static_cast<FK_table *>(child_table)->parent = parent_table;
+
+          /* Ensure foreign key column type matches the parent primary key type so
+           * FK constraints cover more types than just INT. */
+          Column::COLUMN_TYPES pk_type = Column::INT;
+          int pk_length = 0;
+          for (const auto &col : *parent_table->columns_) {
+            if (col->primary_key) {
+              pk_type = col->type_;
+              pk_length = col->length;
+              break;
+            }
+          }
+          for (auto &col : *child_table->columns_) {
+            if (col->name_.find("fk_col") != std::string::npos) {
+              col->type_ = pk_type;
+              col->length = pk_length;
+              break;
+            }
+          }
         }
       }
 
@@ -2621,6 +2771,10 @@ void Table::DeleteRandomRow(Thd1 *thd) {
       case Column::CHAR:
       case Column::BLOB:
       case Column::GENERATED:
+      case Column::DATETIME:
+      case Column::TIMESTAMP:
+      case Column::DATE:
+      case Column::TIME:
         where = col_pos;
         break;
       case Column::INTEGER:
@@ -2688,6 +2842,10 @@ void Table::SelectRandomRow(Thd1 *thd) {
     case Column::CHAR:
     case Column::BLOB:
     case Column::GENERATED:
+    case Column::DATETIME:
+    case Column::TIMESTAMP:
+    case Column::DATE:
+    case Column::TIME:
       where = col_pos;
       break;
     case Column::INTEGER:
@@ -2846,14 +3004,22 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
 
   std::string prepare_sql = "INSERT ";
 
-  std::vector<int> fk_unique_keys;
+  std::vector<std::string> fk_unique_keys;
 
-  /* If a table has FK move its parent keys in fk_unique_keys */
-  if (type == TABLE_TYPES::FK) {
-    fk_unique_keys = std::move(thd->unique_keys);
+  Column::COLUMN_TYPES pk_type = Column::COLUMN_TYPES::INT;
+  int pk_length = 0;
+  for (const auto &col : *columns_) {
+    if (col->primary_key) {
+      pk_type = col->type_;
+      pk_length = col->length;
+      break;
+    }
   }
+
   if (has_pk()) {
-    thd->unique_keys = generateUniqueRandomNumbers(number_of_initial_records);
+    unique_keys =
+        generateUniqueRandomValues(pk_type, number_of_initial_records, pk_length);
+    thd->unique_keys = unique_keys;
   }
 
   /* ignore error in the case parition list  */
@@ -2881,17 +3047,50 @@ bool Table::InsertBulkRecord(Thd1 *thd) {
   std::string values = " VALUES";
   int records = 0;
 
+  // For FK tables, ensure we have the parent's unique keys
+  if (type == TABLE_TYPES::FK) {
+    auto fk_table = static_cast<FK_table *>(this);
+    Table* parent_table = fk_table->parent;
+    // Use the parent table's unique keys directly
+    if (parent_table->has_pk() && !parent_table->unique_keys.empty()) {
+      fk_unique_keys = parent_table->unique_keys;
+    } else if (parent_table->has_pk()) {
+      // If parent table doesn't have unique keys generated yet, generate them
+      Column::COLUMN_TYPES parent_pk_type = Column::COLUMN_TYPES::INT;
+      int parent_pk_length = 0;
+      for (const auto &col : *parent_table->columns_) {
+        if (col->primary_key) {
+          parent_pk_type = col->type_;
+          parent_pk_length = col->length;
+          break;
+        }
+      }
+      if (parent_table->number_of_initial_records > 0) {
+        fk_unique_keys = generateUniqueRandomValues(
+            parent_pk_type, 
+            parent_table->number_of_initial_records, 
+            parent_pk_length);
+        // Also store the generated keys in the parent table
+        parent_table->unique_keys = fk_unique_keys;
+      }
+    }
+  }
+
   while (records < number_of_initial_records) {
     std::string value = "(";
     for (const auto &column : *columns_) {
       /* For FK we get the unique value from the parent table unique vector */
       if (column->name_.find("fk_col") != std::string::npos) {
-        value +=
-            std::to_string(fk_unique_keys[rand_int(fk_unique_keys.size() - 1)]);
+        if (!fk_unique_keys.empty()) {
+          value += fk_unique_keys[rand_int(fk_unique_keys.size() - 1)];
+        } else {
+          // Fallback to generate a value if no parent keys available
+          value += column->rand_value();
+        }
       } else if (column->type_ == Column::COLUMN_TYPES::GENERATED) {
         value += "DEFAULT";
       } else if (column->primary_key) {
-        value += std::to_string(thd->unique_keys.at(records));
+        value += thd->unique_keys.at(records);
       } else if (column->auto_increment == true) {
         value += "NULL";
       } else if (is_list_partition && column->name_.compare("ip_col") == 0) {
@@ -3203,6 +3402,78 @@ static void grammar_sql(std::vector<Table *> *all_tables, Thd1 *thd) {
     std::cout << "NOT ABLE TO FIND any SQL in special SQL" << std::endl;
 }
 
+/* generate more complex DML queries to stress parser and execution paths */
+static void complex_sql(std::vector<Table *> *all_tables, Thd1 *thd) {
+  if (all_tables->empty())
+    return;
+
+  auto table = all_tables->at(rand_int(all_tables->size() - 1));
+  std::string sql;
+
+  auto pick_any_column = [&](Table *t) -> Column * {
+    if (t->columns_->empty())
+      return nullptr;
+    return t->columns_->at(rand_int(t->columns_->size() - 1));
+  };
+
+  auto add_force_index = [&](Table *t) -> std::string {
+    if (t->indexes_->empty())
+      return "";
+    auto idx = t->indexes_->at(rand_int(t->indexes_->size() - 1));
+    return " FORCE INDEX (" + idx->name_ + ")";
+  };
+
+  int kind = rand_int(4);
+  switch (kind) {
+  case 0: { // INSERT IGNORE ... ON DUPLICATE KEY UPDATE
+    auto col = pick_any_column(table);
+    if (!col)
+      break;
+    sql = "INSERT IGNORE INTO " + table->name_ + " (" + col->name_ + ") VALUES (" +
+          col->rand_value() + ") ON DUPLICATE KEY UPDATE " + col->name_ +
+          "=VALUES(" + col->name_ + ")";
+    break;
+  }
+  case 1: { // UPDATE IGNORE with ORDER BY / LIMIT
+    auto col = pick_any_column(table);
+    if (!col)
+      break;
+    sql = "UPDATE IGNORE " + table->name_ + add_force_index(table) +
+          " SET " + col->name_ + "=" + col->rand_value() +
+          " WHERE " + col->name_ + " IS NOT NULL ORDER BY " + col->name_ +
+          " DESC LIMIT " + std::to_string(rand_int(5, 1));
+    break;
+  }
+  case 2: { // DELETE IGNORE with LIMIT
+    auto col = pick_any_column(table);
+    if (!col)
+      break;
+    sql = "DELETE IGNORE FROM " + table->name_ + " WHERE " + col->name_ +
+          " IS NOT NULL LIMIT " + std::to_string(rand_int(5, 1));
+    break;
+  }
+  case 3: { // SELECT STRAIGHT_JOIN with simple ON clause
+    auto other = all_tables->at(rand_int(all_tables->size() - 1));
+    if (other == table || other->columns_->empty())
+      break;
+    auto col1 = pick_any_column(table);
+    auto col2 = pick_any_column(other);
+    if (!col1 || !col2)
+      break;
+    sql = "SELECT /*complex*/ " + col1->name_ + ", " + col2->name_ +
+          " FROM " + table->name_ + " STRAIGHT_JOIN " + other->name_ +
+          " ON 1=1 WHERE " + col1->name_ + " IS NOT NULL ORDER BY " +
+          col2->name_ + " LIMIT " + std::to_string(rand_int(5, 1));
+    break;
+  }
+  default:
+    break;
+  }
+
+  if (!sql.empty())
+    execute_sql(sql, thd);
+}
+
 /* save metadata to a file */
 void save_metadata_to_file() {
   std::string path = opt_string(METADATA_PATH);
@@ -3405,7 +3676,9 @@ static std::string load_metadata_from_file() {
       if (type.compare("INT") == 0 || type.compare("CHAR") == 0 ||
           type.compare("VARCHAR") == 0 || type.compare("BOOL") == 0 ||
           type.compare("FLOAT") == 0 || type.compare("DOUBLE") == 0 ||
-          type.compare("INTEGER") == 0) {
+          type.compare("INTEGER") == 0 || type.compare("DATETIME") == 0 ||
+          type.compare("TIMESTAMP") == 0 || type.compare("DATE") == 0 ||
+          type.compare("TIME") == 0) {
         a = new Column(col["name"].GetString(), type, table);
       } else if (type.compare("GENERATED") == 0) {
         auto name = col["name"].GetString();
@@ -3850,6 +4123,9 @@ bool Thd1::run_some_query() {
       break;
     case Option::GRAMMAR_SQL:
       grammar_sql(all_session_tables, this);
+      break;
+    case Option::COMPLEX_SQL:
+      complex_sql(all_session_tables, this);
       break;
 
     default:

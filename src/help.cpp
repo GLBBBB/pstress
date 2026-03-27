@@ -765,6 +765,12 @@ void add_options() {
   opt->setInt(10);
   opt->setSQL();
 
+  /* complex sql generator */
+  opt = newOption(Option::INT, Option::COMPLEX_SQL, "complex-sql");
+  opt->help = "generate complex DML using keywords like IGNORE, JOIN, FORCE INDEX, etc.";
+  opt->setInt(0);
+  opt->setSQL();
+
   /* file name of special sql */
   opt = newOption(Option::STRING, Option::GRAMMAR_FILE, "grammar-file");
   opt->help =

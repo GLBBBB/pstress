@@ -57,6 +57,10 @@ public:
     BOOL,
     BLOB,
     GENERATED,
+    DATETIME,
+    TIMESTAMP,
+    DATE,
+    TIME,
     COLUMN_MAX // should be last
   } type_;
   /* used to create new table/alter table add column*/
@@ -171,8 +175,8 @@ struct Thd1 {
   int max_con_fail_count = 0; // consecutive failed queries
 
   /* for loading Bulkdata, Primary key of current table is stored in this vector
-   * which  is used for the FK tables  */
-  std::vector<int> unique_keys;
+   * which is used for the FK tables */
+  std::vector<std::string> unique_keys;
   int query_number = 0;
 };
 
@@ -235,6 +239,8 @@ struct Table {
   std::vector<Column *> *columns_;
   std::vector<Index *> *indexes_;
   std::mutex table_mutex;
+  // Store unique keys for this table, used by FK tables
+  std::vector<std::string> unique_keys;
 
   const std::string get_type() const {
     switch (type) {

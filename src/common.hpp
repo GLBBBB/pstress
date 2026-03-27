@@ -128,6 +128,7 @@ struct Option {
     STEP,
     METADATA_PATH,
     GRAMMAR_SQL,
+    COMPLEX_SQL,
     GRAMMAR_FILE,
     DROP_COLUMN,
     ADD_COLUMN,
